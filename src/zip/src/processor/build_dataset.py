@@ -1,3 +1,4 @@
+# src/processor/build_dataset.py
 from __future__ import annotations
 
 import json
@@ -9,9 +10,8 @@ import pandas as pd
 import yaml
 
 from src.processor.auto_ingest_multi import auto_ingest_engine
-from src.processor.aux_plugins import ingest_aux_recruit, ingest_aux_skill
 from src.processor.headcount_2024_loader import load_headcount_2024
-from src.processor.reference_roster import build_reference_roster
+from src.processor.aux_plugins import ingest_aux_recruit, ingest_aux_skill
 
 
 def load_config(path: str | Path) -> dict:
@@ -49,17 +49,20 @@ def _coerce_datetime(s: pd.Series) -> pd.Series:
     else:
         out = pd.to_datetime(s, errors="coerce")
 
+    # Excel serial
     sn = pd.to_numeric(s, errors="coerce")
     mask = sn.between(20000, 60000)
     if mask.any():
         conv = pd.to_datetime("1899-12-30") + pd.to_timedelta(sn[mask], unit="D")
         out.loc[mask] = conv
 
+    # YYYYMMDD
     ss = s.astype(str).str.strip()
     mask2 = ss.str.fullmatch(r"\d{8}", na=False)
     if mask2.any():
         out.loc[mask2] = pd.to_datetime(ss[mask2], format="%Y%m%d", errors="coerce")
 
+    # epoch placeholder 제거
     out = out.mask(out == pd.Timestamp("1970-01-01"))
     return out
 
@@ -67,11 +70,6 @@ def _coerce_datetime(s: pd.Series) -> pd.Series:
 def _month_floor(dt: pd.Series) -> pd.Series:
     d = _coerce_datetime(dt)
     return d.dt.to_period("M").dt.to_timestamp()
-
-
-def _save_df(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
 def build_monthly(master: pd.DataFrame) -> pd.DataFrame:
@@ -125,6 +123,7 @@ def build_dept_monthly(master: pd.DataFrame) -> pd.DataFrame:
     out["hires"] = out["hires"].astype(int)
     out["exits"] = out["exits"].astype(int)
 
+    # ✅ 신규 부서가 과거부터 0으로 깔리는 문제 방지: 첫 등장월 이전 제거
     first = (
         out[(out["hires"] > 0) | (out["exits"] > 0)]
         .groupby(["org", "dept"])["month"]
@@ -235,38 +234,20 @@ def build_qa_outputs(
     ref_only = pd.concat(ref_only_rows, ignore_index=True) if ref_only_rows else pd.DataFrame(columns=["year", "type", "name", "source_file", "sheet"])
     master_only = pd.concat(master_only_rows, ignore_index=True) if master_only_rows else pd.DataFrame(columns=["snapshot_year", "emp_id", "name", "org", "dept", "data_source", "sheet_name"])
 
-    _save_df(ref_only, qa_dir / "mismatch_ref_only.csv")
-    _save_df(master_only, qa_dir / "mismatch_master_only.csv")
-
-    duplicate_emp_id_rows = 0
-    if not master.empty and "emp_id" in master.columns:
-        s = master["emp_id"].fillna("").astype(str).str.strip()
-        s = s[s.ne("")]
-        if not s.empty:
-            duplicate_emp_id_rows = int(s.duplicated(keep=False).sum())
-
-    missing_org_rows = int(master["org"].isna().sum()) if "org" in master.columns else 0
-    missing_dept_rows = int(master["dept"].isna().sum()) if "dept" in master.columns else 0
-
-    bad_date_rows = 0
-    if not master.empty and "join_date" in master.columns and "exit_date" in master.columns:
-        jd = _coerce_datetime(master["join_date"])
-        ed = _coerce_datetime(master["exit_date"])
-        bad_date_rows = int(((jd.notna()) & (ed.notna()) & (jd > ed)).sum())
+    ref_only_path = qa_dir / "mismatch_ref_only.csv"
+    master_only_path = qa_dir / "mismatch_master_only.csv"
+    ref_only.to_csv(ref_only_path, index=False, encoding="utf-8-sig")
+    master_only.to_csv(master_only_path, index=False, encoding="utf-8-sig")
 
     report = {
-        "reference_roster_rows": int(len(reference_roster)),
-        "master_rows": int(len(master)),
+        "reference_roster_rows": int(len(reference_roster)) if isinstance(reference_roster, pd.DataFrame) else 0,
+        "master_rows": int(len(master)) if isinstance(master, pd.DataFrame) else 0,
         "mismatch_ref_only_rows": int(len(ref_only)),
         "mismatch_master_only_rows": int(len(master_only)),
-        "duplicate_emp_id_rows": duplicate_emp_id_rows,
-        "missing_org_rows": missing_org_rows,
-        "missing_dept_rows": missing_dept_rows,
-        "bad_date_rows": bad_date_rows,
         "years_compared": years,
         "paths": {
-            "mismatch_ref_only": str((qa_dir / "mismatch_ref_only.csv")).replace("\\", "/"),
-            "mismatch_master_only": str((qa_dir / "mismatch_master_only.csv")).replace("\\", "/"),
+            "mismatch_ref_only": str(ref_only_path).replace("\\", "/"),
+            "mismatch_master_only": str(master_only_path).replace("\\", "/"),
         },
     }
     (qa_dir / "qa_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -302,28 +283,42 @@ def build_datasets(config_path: str | Path) -> BuildResult:
     processed_root = Path(cfg["paths"]["processed_dir"])
     processed_root.mkdir(parents=True, exist_ok=True)
 
+    # ✅ v2 processed layer structure
     bronze_dir = processed_root / "bronze"
     silver_dir = processed_root / "silver"
     gold_dir = processed_root / "gold"
     qa_dir = processed_root / "qa"
-    addons_dir = processed_root / "addons"
-    for d in [bronze_dir, silver_dir, gold_dir, qa_dir, addons_dir]:
+    aux_dir = processed_root / "aux"
+    for d in [bronze_dir, silver_dir, gold_dir, qa_dir, aux_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     master_auto, ingest_report = auto_ingest_engine(raw_dir, processed_root, secrets=cfg.get("secrets"))
 
+    # --- Save ingest report/manifest into bronze (and keep compatibility at root) ---
+    try:
+        (bronze_dir / "ingest_report.json").write_text(json.dumps(ingest_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # ---- reference roster (verification table) ----
+    # auto_ingest_multi에서 aux_reference_roster로 분류된 파일들을 기준으로 생성됨
+    from src.processor.reference_roster import build_reference_roster
+    reference_roster = build_reference_roster(ingest_report, raw_dir, aux_dir)
+
+    # ---- aux plugins (skill/recruit) ----
+    aux_skill_df = ingest_aux_skill(ingest_report, raw_dir, aux_dir)
+    aux_recruit_df = ingest_aux_recruit(ingest_report, raw_dir, aux_dir)
+
     tmp = drop_sensitive(master_auto)
-    master_auto = tmp if tmp is not None else pd.DataFrame()
+    master_auto = tmp if tmp is not None else master_auto
 
-    reference_roster = build_reference_roster(ingest_report, raw_dir, addons_dir)
-    aux_skill_df = ingest_aux_skill(ingest_report, raw_dir, addons_dir)
-    aux_recruit_df = ingest_aux_recruit(ingest_report, raw_dir, addons_dir)
-
+    # ---- Gold metrics ----
     turnover_yearly = build_turnover_yearly(master_auto)
     monthly = build_monthly(master_auto)
     dept_monthly = build_dept_monthly(master_auto)
     early_exit_30d = build_early_exit_30d(master_auto)
 
+    # ---- totals ----
     total_est = 0
     if master_auto is not None and not master_auto.empty:
         d = master_auto.copy()
@@ -347,24 +342,28 @@ def build_datasets(config_path: str | Path) -> BuildResult:
         except Exception:
             total_gt = 0
 
+    # ---- QA outputs ----
     qa_ref_only, qa_master_only, qa_report = build_qa_outputs(master_auto, reference_roster, qa_dir)
 
-    (bronze_dir / "ingest_report.json").write_text(json.dumps(ingest_report, ensure_ascii=False, indent=2), encoding="utf-8")
-    _save_df(master_auto, silver_dir / "master_auto.csv")
-    _save_df(turnover_yearly, gold_dir / "turnover_yearly.csv")
-    _save_df(monthly, gold_dir / "monthly.csv")
-    _save_df(dept_monthly, gold_dir / "dept_monthly.csv")
-    _save_df(early_exit_30d, gold_dir / "early_exit_30d.csv")
+    # ---- Save layered outputs ----
+    # Silver
+    if master_auto is not None:
+        master_auto.to_csv(silver_dir / "master_auto.csv", index=False, encoding="utf-8-sig")
 
-    # v1 호환 파일도 유지
+    # Gold
+    turnover_yearly.to_csv(gold_dir / "turnover_yearly.csv", index=False, encoding="utf-8-sig")
+    monthly.to_csv(gold_dir / "monthly.csv", index=False, encoding="utf-8-sig")
+    dept_monthly.to_csv(gold_dir / "dept_monthly.csv", index=False, encoding="utf-8-sig")
+    early_exit_30d.to_csv(gold_dir / "early_exit_30d.csv", index=False, encoding="utf-8-sig")
+
+    # Compatibility: also drop top-level files expected by v1 UI/scripts
     try:
-        _save_df(master_auto, processed_root / "master_auto.csv")
-        _save_df(turnover_yearly, processed_root / "turnover_yearly.csv")
-        _save_df(monthly, processed_root / "monthly.csv")
-        _save_df(dept_monthly, processed_root / "dept_monthly.csv")
-        _save_df(early_exit_30d, processed_root / "early_exit_30d.csv")
+        master_auto.to_csv(processed_root / "master_auto.csv", index=False, encoding="utf-8-sig")
+        turnover_yearly.to_csv(processed_root / "turnover_yearly.csv", index=False, encoding="utf-8-sig")
+        monthly.to_csv(processed_root / "monthly.csv", index=False, encoding="utf-8-sig")
+        dept_monthly.to_csv(processed_root / "dept_monthly.csv", index=False, encoding="utf-8-sig")
+        early_exit_30d.to_csv(processed_root / "early_exit_30d.csv", index=False, encoding="utf-8-sig")
         (processed_root / "ingest_report.json").write_text(json.dumps(ingest_report, ensure_ascii=False, indent=2), encoding="utf-8")
-        (processed_root / "qa_report.json").write_text(json.dumps(qa_report, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 

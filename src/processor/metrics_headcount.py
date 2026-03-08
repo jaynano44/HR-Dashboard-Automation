@@ -51,6 +51,8 @@ def early_exit_by_dept(exited_df: pd.DataFrame, days: int = 30,
     Count exits within `days` days of join, grouped by dept/org.
     Returns DataFrame columns ['group', f'early_exit_{days}d'] sorted desc.
     """
+    if join_col not in exited_df.columns or exit_col not in exited_df.columns:
+        return pd.DataFrame(columns=["group", f"early_exit_{days}d"])
     if exited_df is None:
         return pd.DataFrame(columns=["group", f"early_exit_{days}d"])
 
