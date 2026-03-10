@@ -1,239 +1,157 @@
-# HR Dashboard Automation
+# HR Intelligence Platform
 
-Excel 기반 HR 데이터를 자동 정규화하고 KPI 데이터셋을 생성하는 **HR
-데이터 파이프라인 + 분석 대시보드 프로젝트**입니다.
+> 파편화된 HR Excel 데이터를 자동 수집·표준화하고,  
+> KPI 분석 · 퇴사 위험 탐지 · 인력 추천까지 연결되는 **범용 HR 데이터 엔진**
 
-이 프로젝트는 다양한 HR Excel 데이터를 자동 수집·정규화하고, 분석용 HR
-KPI 데이터셋을 생성한 뒤 Streamlit 기반 대시보드로 시각화합니다.
+---
 
-------------------------------------------------------------------------
+## 버전 현황
 
-# 프로젝트 목적
+| 태그 | 설명 | 상태 |
+|---|---|---|
+| `v1_baseline` | HR Dashboard MVP 초기 프로토타입 | 완료 |
+| `v1.1-stable` | 데이터 파이프라인 안정화 + QA 구조 | 완료 |
+| `v1.2-dev` | 시트 단위 분류 + 타임아웃 + docs 구조화 | **진행 중** |
+| `v1.3` | 범용 schema mapper + entity resolution | 예정 |
+| `v2.0` | ML 퇴사 예측 + HR 챗봇 | 예정 |
 
-많은 조직에서 HR 데이터는 다양한 Excel 파일로 분산 관리됩니다.
+---
 
-대표적인 문제
+## 시스템 구조
 
--   여러 부서에서 서로 다른 HR Excel 양식 사용
--   입사 / 퇴사 기록이 여러 파일에 분산
--   조직명 / 부서명 표기 방식 불일치
--   분석용 데이터셋을 만들기 위해 반복적인 수작업 정리 필요
+```
+Raw HR Excel (다양한 양식)
+        ↓
+Auto Ingest Engine       ← 시트 단위 자동 분류 + fingerprint
+        ↓
+Schema Registry          ← master / aux_skill / reference_roster 등 분류
+        ↓
+Build Dataset            ← 표준 스키마로 정규화 + 중복 제거
+        ↓
+Bronze / Silver / Gold   ← 원본 보존 → 정제 → KPI 집계
+        ↓
+Streamlit Dashboard      ← 인력 현황 / 월별 추세 / 조기퇴사 / QA
+```
 
-이 프로젝트는 이러한 문제를 해결하기 위해
+---
 
-**HR Excel 데이터를 자동 수집 → 표준화 → 분석 데이터셋 생성 → 대시보드
-시각화**
+## 주요 기능
 
-까지 이어지는 **HR 데이터 파이프라인 시스템**을 구축하는 것을 목표로
-합니다.
+### v1.2-dev 현재
+- **시트 단위 자동 분류** — 한 파일 안에 `재직자(master)` + `프로그래머(aux_skill)` 혼재해도 자동 분리
+- **파일/전체 타임아웃** — 파일당 30초, 전체 180초 제한으로 hang 방지
+- **증분 처리** — fingerprint 기반으로 변경된 파일만 재처리
+- **민감정보 자동 드랍** — 주민번호, 핸드폰, 이메일 ingest 시 자동 제거
+- **다양한 날짜 포맷 대응** — Excel serial / YYYYMMDD / 한국식 날짜 자동 변환
+- **QA 검증** — reference roster 대비 누락/불일치 인원 자동 탐지
 
-------------------------------------------------------------------------
+### 대시보드 탭 구성
+| 탭 | 내용 |
+|---|---|
+| 요약 | 총인원 KPI 카드 + master 전체 현황 |
+| 총인력변동(연도) | 연도별 입/퇴사/순증감 |
+| 월별 추세 | 월별 입/퇴사 라인차트 |
+| 부서(팀) 지표 | 팀별 인력 변화 |
+| 30일 이내 퇴사 | 조기퇴사자 목록 |
+| QA | 데이터 정합성 검증 결과 |
+| Addons | 스킬 인벤토리 / 채용 데이터 |
 
-# 시스템 아키텍처
+---
 
-Raw HR Excel Files\
-↓\
-Auto Ingest Engine\
-↓\
-Canonical HR Dataset (master_auto)\
-↓\
-Dataset Builder\
-↓\
-HR KPI Dataset\
-↓\
-Streamlit Dashboard
+## 실행 방법
 
-------------------------------------------------------------------------
+### 1. 환경 설정
 
-# 주요 기능
-
-## 1. 자동 Ingest
-
-raw 폴더의 여러 Excel 파일을 자동 스캔합니다.
-
-지원 기능
-
--   여러 시트를 포함한 Excel 파일 처리
--   다양한 HR 양식에서 공통 컬럼 추출
--   표준 HR 스키마로 정규화
-
-표준 HR 컬럼 예시
-
--   emp_id
--   name
--   org
--   dept
--   join_date
--   exit_date
-
-정규화된 데이터는
-
-    master_auto.csv
-
-로 생성됩니다.
-
-------------------------------------------------------------------------
-
-## 2. 중복 제거
-
-여러 HR 파일에서 동일 인력이 등장할 수 있기 때문에 다음 규칙으로 중복을
-제거합니다.
-
-1.  사번(emp_id) 우선
-2.  사번이 없는 경우 이름 기반 보조 매칭
-3.  퇴사 정보 / 최신 스냅샷 우선 반영
-
-이를 통해 **HR Master Dataset**을 자동 생성합니다.
-
-------------------------------------------------------------------------
-
-## 3. KPI Dataset Builder
-
-master dataset을 기반으로 분석용 KPI 데이터셋을 생성합니다.
-
-생성 데이터셋
-
--   연도별 총인력 변동
--   월별 입사 / 퇴사 추세
--   부서(팀)별 인력 변화
--   30일 이내 퇴사 분석
--   연간 퇴사율
-
-이 데이터셋은
-
-    data/processed/gold/
-
-레이어에 저장됩니다.
-
-------------------------------------------------------------------------
-
-## 4. QA / 데이터 검증
-
-reference roster 기반 데이터 검증을 수행합니다.
-
-예시
-
--   reference roster에만 존재하는 인원
--   master dataset에만 존재하는 인원
-
-검증 결과는
-
-    data/processed/qa/
-
-폴더에 저장됩니다.
-
-------------------------------------------------------------------------
-
-## 5. Addons 확장 데이터
-
-HR master 외에도 다음 데이터를 별도로 관리합니다.
-
--   Skill Inventory
--   Recruit Inventory
--   Reference Roster
-
-이 데이터는
-
-    data/processed/addons/
-
-레이어로 분리하여 관리합니다.
-
-이 구조를 통해 향후 HR 분석 기능 확장을 쉽게 할 수 있도록 설계했습니다.
-
-------------------------------------------------------------------------
-
-# 폴더 구조
-
-    src/
-      processor/
-      dashboard/
-
-    data/
-      raw/
-      processed/
-        bronze/
-        silver/
-        gold/
-        qa/
-        addons/
-
-------------------------------------------------------------------------
-
-# 실행 방법
-
-## 1. 패키지 설치
-
+```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows
 pip install -r requirements.txt
+```
 
-## 2. 실행
+### 2. 데이터 전처리
 
+```bash
+python preprocess.py          # 신규/변경 파일만 (기본)
+python preprocess.py --force  # 전체 강제 재처리
+python preprocess.py --check  # 신규 파일 유무만 확인
+```
+
+### 3. 대시보드 실행
+
+```bash
 streamlit run main.py
+```
 
-------------------------------------------------------------------------
+---
 
-# 캐시 / 재처리 초기화
+## 폴더 구조
 
-전체 재처리를 수행하려면 다음 파일을 삭제합니다.
+```
+HR-Dashboard-Automation_MVP/
+├── src/
+│   ├── processor/
+│   │   ├── auto_ingest_multi.py    ← 핵심 ingest 엔진 (시트 단위 분류)
+│   │   ├── schema_registry.py      ← 파일/시트 양식 분류 규칙
+│   │   ├── build_dataset.py        ← Gold CSV 생성
+│   │   ├── preprocess.py           ← CLI 전처리 진입점
+│   │   ├── career_rank_loader.py   ← 경력연차 파싱
+│   │   ├── headcount_2024_loader.py
+│   │   ├── org_standardize.py
+│   │   └── metrics.py / metrics_dept.py
+│   └── dashboard/
+│       └── app.py                  ← Streamlit 대시보드
+├── data/
+│   ├── raw/                        ← 원본 Excel (수정 금지)
+│   │   ├── headcount/
+│   │   ├── roster/
+│   │   ├── skills/
+│   │   └── ...
+│   └── processed/                  ← 전처리 산출물
+│       ├── bronze/
+│       ├── silver/
+│       ├── gold/
+│       ├── qa/
+│       └── addons/
+├── docs/
+│   ├── 01_Architecture/            ← 플랫폼 설계서
+│   ├── 02_Data/                    ← 데이터 모델 / KPI 로직
+│   ├── 04_Engineering/             ← 기술 결정 / 트러블슈팅
+│   └── 05_archive/                 ← 구버전 문서 보관
+├── config.yaml                     ← 경로 / 컬럼 설정
+├── preprocess.py                   ← 전처리 CLI
+└── main.py                         ← 대시보드 진입점
+```
 
--   ingest_manifest.json
--   ingest_report.json
--   master_auto.csv
+---
 
-그리고 Streamlit에서 **Clear cache**를 수행합니다.
+## 캐시 초기화 (전체 재처리 필요 시)
 
-------------------------------------------------------------------------
+```powershell
+Remove-Item "data\processed\ingest_manifest.json" -ErrorAction SilentlyContinue
+Remove-Item "data\processed\ingest_report.json" -ErrorAction SilentlyContinue
+Remove-Item "data\processed\master_auto.csv" -ErrorAction SilentlyContinue
+```
 
-# 현재 버전
+이후 `python preprocess.py --force` 실행
 
-## v1.1-stable
+---
 
-MVP 이후 **데이터 파이프라인 안정화 버전**
+## 로드맵
 
-포함 기능
+```
+v1.2  KPI 정확도 + Attrition Risk 안정화 + 로컬 exe 배포
+v1.3  범용 schema mapper + entity resolver + multi-profile config
+v2.0  ML 퇴사 예측 + 조직 건강도 + HR 챗봇 (Claude API RAG)
+v2.1  인력 추천 엔진 + 채용 매칭
+v3.0  성과/보상/진급 + 시뮬레이터
+```
 
--   raw 자동 ingest 구조
--   multi-sheet Excel 처리
--   canonical HR 컬럼 통합
--   KPI 데이터셋 생성
--   QA 검증 구조
--   addons 확장 데이터 구조
--   Streamlit UI 안정화
+---
 
-------------------------------------------------------------------------
+## 기술 스택
 
-# 이전 버전
+`Python 3.11` `Pandas` `Streamlit` `OpenPyXL` `Plotly` `PyYAML`
 
-## MVP
+---
 
-초기 HR 자동화 대시보드 프로토타입.
-
-### 포함 데이터 (예시)
-
--   2021\~2024년 입사/퇴사 명단
--   인력 등급 데이터
--   조직도 (참고용)
-
-### 실행
-
-pip install -r requirements.txt
-
-streamlit run main.py
-
-### 산출물
-
--   data/processed/grade_clean.csv
--   data/processed/turnover_clean.csv
--   data/processed/turnover_yearly.csv
--   data/processed/grade_fixed.csv
-
-------------------------------------------------------------------------
-
-# 다음 버전 계획
-
-v2에서 다음 기능을 확장할 예정입니다.
-
--   intake validation 구조
--   신규 HR Excel 양식 자동 판별 보조
--   skill / recruit 데이터 정규화
--   HR AI Agent
--   데이터 파이프라인 모니터링
+*현재 버전: v1.2-dev | 다음 목표: v1.2-stable*
