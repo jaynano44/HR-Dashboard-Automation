@@ -8,7 +8,7 @@ files:
   turnover_xls: 2021~2024년 입사자, 퇴사자 명단(비밀번호1111).xls
   grade_xlsx: 인력등급-20230921.xlsx
   org_xlsx: 조직도-20230705.xlsx
-  headcount_2024_xlsx: 2024년 인원현황-20241121- 등급기초자료(설문포함).xlsx
+  headcount_2024_xlsx: headcount/2024년 인원현황-20241121- 등급기초자료(설문포함).xlsx
   org_alias_map_csv: org_alias_map.csv
   org_changes_csv: org_changes.csv
 
