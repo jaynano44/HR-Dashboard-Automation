@@ -58,6 +58,8 @@ def _norm_key(x: object) -> str:
 
 def _contains_any(text: object, keys: Iterable[str]) -> bool:
     t = _norm_key(text)
+    if not t:
+        return False
     return any(_norm_key(k) in t or t in _norm_key(k) for k in keys if _norm_key(k))
 
 
@@ -68,10 +70,17 @@ def _is_empty_val(x: object) -> bool:
 
 def _looks_like_person_name(x: object) -> bool:
     t = _clean_text(x)
-    if not t or len(t) < 2 or len(t) > 12:
+    if not t:
         return False
-    if any(ch.isdigit() for ch in t):
+
+    # 🔥 길이 제한 완화
+    if len(t) > 30:
         return False
+
+    # 숫자 너무 많으면 제외
+    if sum(c.isdigit() for c in t) > 3:
+        return False
+    
     if _contains_any(t, SKIP_TEXT + DEPT_KEYS + TITLE_KEYS + PHONE_KEYS + EMAIL_KEYS + EXT_KEYS):
         return False
     return True
@@ -212,50 +221,78 @@ def _rowwise_org_fill(df: pd.DataFrame) -> pd.DataFrame:
 def _extract_rows_from_block(block: pd.DataFrame, sheet_name: str, block_index: int) -> ParseBlockResult:
     header_idx = _find_header_row(block)
 
-    # 1) 정형 테이블인 경우
+        # 1) 정형 테이블인 경우
     if header_idx is not None:
         work = block.copy()
         work = _rowwise_org_fill(work)
+
         cols = _make_unique_columns(work.iloc[header_idx].tolist())
         body = work.iloc[header_idx + 1 :].copy().reset_index(drop=True)
         body.columns = cols
         body = body.dropna(how="all")
 
-        name_col = _pick_col(cols, NAME_KEYS)
-        dept_col = _pick_col(cols, DEPT_KEYS)
-        title_col = _pick_col(cols, TITLE_KEYS)
-        phone_col = _pick_col(cols, PHONE_KEYS)
-        email_col = _pick_col(cols, EMAIL_KEYS)
-        ext_col = _pick_col(cols, EXT_KEYS)
-
         rows = []
+
+        # 성명/이름 컬럼이 나오는 위치를 모두 찾는다
+        name_positions = [i for i, c in enumerate(cols) if _contains_any(c, NAME_KEYS)]
+
+        if not name_positions:
+            return ParseBlockResult(sheet_name, block_index, pd.DataFrame())
+
         for _, r in body.iterrows():
-            name = _clean_text(r.get(name_col)) if name_col else ""
-            dept_raw = _clean_text(r.get(dept_col)) if dept_col else ""
-            title = _clean_text(r.get(title_col)) if title_col else ""
-            phone = _clean_text(r.get(phone_col)) if phone_col else ""
-            email = _clean_text(r.get(email_col)) if email_col else ""
-            ext = _clean_text(r.get(ext_col)) if ext_col else ""
+            for name_idx in name_positions:
+                vals = r.tolist()
 
-            if not _looks_like_person_name(name):
-                continue
+                name = _clean_text(vals[name_idx]) if name_idx < len(vals) else ""
+                if not name:
+                    continue
 
-            org_levels = _split_org_path_from_text(dept_raw)
-            row = {
-                "org_level_1": org_levels[0],
-                "org_level_2": org_levels[1],
-                "org_level_3": org_levels[2],
-                "org": org_levels[0] or org_levels[1] or org_levels[2],
-                "dept": org_levels[2] or org_levels[1] or dept_raw,
-                "name": name,
-                "title": title,
-                "phone": phone or ext,
-                "email": email,
-                "source_sheet": sheet_name,
-                "source_block": block_index,
-                "parse_mode": "tabular_contact",
-            }
-            rows.append(row)
+                # 이름 앞쪽 1~4칸에서 조직 후보 찾기
+                org_candidates = []
+                for j in range(max(0, name_idx - 4), name_idx):
+                    vv = _clean_text(vals[j])
+                    if vv:
+                        org_candidates.append(vv)
+
+                dept_raw = ""
+                if org_candidates:
+                    dept_raw = " / ".join(org_candidates)
+
+                # 이름 오른쪽 1~4칸에서 직책/전화/메일 찾기
+                title = ""
+                phone = ""
+                email = ""
+                ext = ""
+
+                for j in range(name_idx + 1, min(len(vals), name_idx + 5)):
+                    vv = _clean_text(vals[j])
+                    if not vv:
+                        continue
+                    if _contains_any(vv, TITLE_KEYS) and not title:
+                        title = vv
+                    elif _looks_like_phone(vv) and not phone:
+                        phone = vv
+                    elif _looks_like_email(vv) and not email:
+                        email = vv
+                    elif _contains_any(vv, EXT_KEYS) and not ext:
+                        ext = vv
+
+                org_levels = _split_org_path_from_text(dept_raw)
+
+                rows.append({
+                    "org_level_1": org_levels[0],
+                    "org_level_2": org_levels[1],
+                    "org_level_3": org_levels[2],
+                    "org": org_levels[0] or org_levels[1] or org_levels[2] or dept_raw,
+                    "dept": org_levels[2] or org_levels[1] or dept_raw,
+                    "name": name,
+                    "title": title,
+                    "phone": phone or ext,
+                    "email": email,
+                    "source_sheet": sheet_name,
+                    "source_block": block_index,
+                    "parse_mode": "tabular_contact_multi",
+                })
 
         return ParseBlockResult(sheet_name, block_index, pd.DataFrame(rows))
 
@@ -268,51 +305,50 @@ def _extract_rows_from_block(block: pd.DataFrame, sheet_name: str, block_index: 
 
     for _, rr in work.iterrows():
         vals = [_clean_text(x) for x in rr.tolist()]
-        vals = [v for v in vals if v]
-        if not vals:
-            continue
 
-        # 조직 단서 수집
-        org_candidates = [v for v in vals if _looks_like_org_name(v)]
-        name_candidates = [v for v in vals if _looks_like_person_name(v)]
-        title_candidates = [v for v in vals if _contains_any(v, TITLE_KEYS) or v.endswith("님") or v.endswith("장")]
-        phone_candidates = [v for v in vals if _looks_like_phone(v)]
-        email_candidates = [v for v in vals if _looks_like_email(v)]
+        for i, v in enumerate(vals):
 
-        if org_candidates and not name_candidates:
-            # 조직 헤더 행으로 판단
-            current_l1, current_l2, current_l3 = _merge_org_context(current_l1, current_l2, current_l3, org_candidates)
-            continue
+            # 🔥 조직 먼저 업데이트
+            if _looks_like_org_name(v):
+                current_l1, current_l2, current_l3 = _merge_org_context(
+                    current_l1, current_l2, current_l3, [v]
+                )
+                continue
 
-        if not name_candidates:
-            continue
+            # 🔥 이름 찾기
+            if len(v) >= 2 and len(v) <= 20:
 
-        # 첫 이름 기준으로 1인 1행 추출
-        name = name_candidates[0]
-        title = title_candidates[0] if title_candidates else ""
-        phone = phone_candidates[0] if phone_candidates else ""
-        email = email_candidates[0] if email_candidates else ""
+                name = v
 
-        # 행 안에 조직 단서가 있으면 current context 갱신
-        if org_candidates:
-            current_l1, current_l2, current_l3 = _merge_org_context(current_l1, current_l2, current_l3, org_candidates)
+                title = ""
+                phone = ""
+                email = ""
 
-        rows.append(
-            {
-                "org_level_1": current_l1,
-                "org_level_2": current_l2,
-                "org_level_3": current_l3,
-                "org": current_l1 or current_l2 or current_l3,
-                "dept": current_l3 or current_l2,
-                "name": name,
-                "title": title,
-                "phone": phone,
-                "email": email,
-                "source_sheet": sheet_name,
-                "source_block": block_index,
-                "parse_mode": "heuristic_contact",
-            }
-        )
+                for j in range(max(0, i-2), min(len(vals), i+3)):
+                    vv = vals[j]
+
+                    if _looks_like_phone(vv):
+                        phone = vv
+                    elif _looks_like_email(vv):
+                        email = vv
+                    elif _contains_any(vv, TITLE_KEYS):
+                        title = vv
+
+                rows.append({
+                    "org_level_1": current_l1,
+                    "org_level_2": current_l2,
+                    "org_level_3": current_l3,
+                    "org": current_l1 or current_l2 or current_l3,
+                    "dept": current_l3 or current_l2,
+                    "name": name,
+                    "title": title,
+                    "phone": phone,
+                    "email": email,
+                    "source_sheet": sheet_name,
+                    "source_block": block_index,
+                    "parse_mode": "cell_scan",
+                })
+        
 
     return ParseBlockResult(sheet_name, block_index, pd.DataFrame(rows))
 
@@ -405,3 +441,73 @@ if __name__ == "__main__":
         print(f"rows={len(df)}")
     else:
         print("sample file not found")
+
+
+# ===== 연락망 전용 파서 =====
+
+def clean_merged_cells(df):
+    return df.fillna(method="ffill")
+
+
+def split_wide_table(df):
+    chunks = []
+
+    cols = df.columns.tolist()
+    step = 5
+
+    for i in range(0, len(cols), step):
+        sub_cols = cols[i:i+step]
+
+        if len(sub_cols) < 3:
+            continue
+
+        sub_df = df[sub_cols].copy()
+
+        try:
+            sub_df.columns = ["org", "name", "title", "phone", "email"][:len(sub_cols)]
+        except:
+            continue
+
+        chunks.append(sub_df)
+
+    if chunks:
+        return pd.concat(chunks, ignore_index=True)
+
+    return pd.DataFrame()
+
+
+def parse_contact_sheet(df):
+
+    df = df.ffill()
+
+    # ===== 컬럼 rename 먼저 =====
+    rename_map = {
+        "성명": "name",
+        "이름": "name",
+        "사원명": "name",
+        "부서": "org",
+        "부서.1": "org",
+        "직책": "title",
+        "휴대폰": "phone",
+        "e-mail": "email",
+        "e-mail.1": "email"
+    }
+
+    df = df.rename(columns=rename_map)
+
+    # 🔥 중복 컬럼 제거 (핵심)
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    # ===== name 컬럼 없으면 종료 =====
+    if "name" not in df.columns:
+        return pd.DataFrame()
+
+    # ===== 필요한 컬럼만 선택 =====
+    cols = [c for c in ["name", "org", "title", "phone", "email"] if c in df.columns]
+
+    df = df[cols]
+
+    # ===== name 기준 필터 =====
+    df = df[df["name"].notna()]
+
+    return df

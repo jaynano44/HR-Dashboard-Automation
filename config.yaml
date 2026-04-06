@@ -1,0 +1,7 @@
+paths:
+  raw_dir: data/raw
+  bronze_dir: data/bronze
+  silver_dir: data/silver
+  gold_dir: data/gold
+  qa_dir: data/qa
+  reference_dir: data/reference

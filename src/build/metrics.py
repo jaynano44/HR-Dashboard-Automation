@@ -23,3 +23,25 @@ def yearly_turnover_summary(turnover_df: pd.DataFrame) -> pd.DataFrame:
     out = g.rename(columns={"hire": "hires", "exit": "exits"}).reset_index()
     out["net"] = out["hires"] - out["exits"]
     return out.sort_values("year")
+
+def build_metrics(snapshot_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    snapshot 기반 기본 metrics 생성
+    """
+
+    df = snapshot_df.copy()
+
+    # 기본 정리
+    df = df.dropna(subset=["name"])
+
+    # headcount
+    org_cols = [c for c in df.columns if c.startswith("org_level_")]
+
+    if org_cols:
+        org_col = org_cols[-1]
+    else:
+        org_col = "org"
+
+    headcount = df.groupby(org_col).size().reset_index(name="headcount")
+
+    return headcount

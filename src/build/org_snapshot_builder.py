@@ -26,7 +26,10 @@ def _find_col(columns, keywords):
 
 def _load_with_header_guess(path: Path) -> pd.DataFrame:
     raw = pd.read_excel(path, header=None)
-    raw = raw.ffill(axis=0).ffill(axis=1)
+    raw = raw.ffill(axis=0)
+    raw = raw.ffill(axis=1)
+    raw = raw.infer_objects(copy=False)
+    pd.set_option('future.no_silent_downcasting', True)
 
     best_idx = 0
     best_score = -1
@@ -78,8 +81,46 @@ def build_org_snapshot():
 
             temp = pd.DataFrame()
             temp["name"] = df[name_col].map(_norm)
-            temp["org"] = df[org_col].map(_norm)
-            temp["dept"] = df[dept_col].map(_norm) if dept_col else ""
+            # 조직 후보 컬럼 찾기
+            org_candidates = []
+
+            for c in cols:
+                txt = str(c)
+                if any(k in txt for k in ["본부", "소속", "조직", "사업부", "센터", "부서", "팀", "그룹", "파트"]):
+                    org_candidates.append(c)
+
+            # 중복 제거 + 순서 유지
+            seen = set()
+            org_candidates = [x for x in org_candidates if not (x in seen or seen.add(x))]
+
+            # org_level 자동 생성
+            if not org_candidates:
+                print(f"⚠ 조직 컬럼 없음 → fallback 적용: {fname}")
+
+                if org_col:
+                    temp["org_level_1"] = df[org_col].map(_norm)
+                else:
+                    temp["org_level_1"] = "UNKNOWN"
+
+                if dept_col:
+                    temp["org_level_2"] = df[dept_col].map(_norm)
+                else:
+                    temp["org_level_2"] = ""
+
+            else:
+                for i, col in enumerate(org_candidates):
+                    temp[f"org_level_{i+1}"] = df[col].map(_norm)
+
+            # org_path 생성 (동적)
+            org_cols = [c for c in temp.columns if c.startswith("org_level_")]
+
+            temp["org_path"] = temp[org_cols].apply(
+                lambda x: " > ".join([v for v in x if v]), axis=1
+            )
+
+            # 호환용 컬럼 (안전하게)
+            temp["org"] = temp[org_cols[0]] if len(org_cols) > 0 else ""
+            temp["dept"] = temp[org_cols[1]] if len(org_cols) > 1 else ""
 
             temp = temp[~temp["name"].isin(["", "nan", "None"])]
             temp = temp[~temp["org"].isin(["", "nan", "None"])]
@@ -104,6 +145,8 @@ def build_org_snapshot():
     result.to_csv(REF_DIR / "org_snapshot.csv", index=False, encoding="utf-8-sig")
     print("✅ 조직 스냅샷 생성 완료")
 
+    return result 
+
     if MOVE_TO_ARCHIVE:
         archive_dir = RAW_DIR / "archive"
         archive_dir.mkdir(exist_ok=True)
@@ -125,3 +168,4 @@ def build_org_snapshot():
 
 if __name__ == "__main__":
     build_org_snapshot()
+    
